@@ -1,0 +1,48 @@
+import type { ClusterNode } from '../types/scheduler';
+
+export const initialNodes: ClusterNode[] = [
+  {
+    id: 'node-compute-1',
+    name: 'node-compute-1',
+    zone: 'az-a',
+    role: 'cpu-pool',
+    capacityCpu: 16,
+    capacityMem: 64,
+    usedCpu: 2,
+    usedMem: 8,
+    pods: [],
+  },
+  {
+    id: 'node-memory-1',
+    name: 'node-memory-1',
+    zone: 'az-b',
+    role: 'mem-pool',
+    capacityCpu: 12,
+    capacityMem: 96,
+    usedCpu: 1,
+    usedMem: 18,
+    pods: [],
+  },
+  {
+    id: 'node-edge-1',
+    name: 'node-edge-1',
+    zone: 'edge-a',
+    role: 'edge',
+    capacityCpu: 8,
+    capacityMem: 32,
+    usedCpu: 1,
+    usedMem: 6,
+    pods: [],
+  },
+  {
+    id: 'node-mixed-1',
+    name: 'node-mixed-1',
+    zone: 'az-c',
+    role: 'mixed',
+    capacityCpu: 20,
+    capacityMem: 80,
+    usedCpu: 4,
+    usedMem: 14,
+    pods: [],
+  },
+];
