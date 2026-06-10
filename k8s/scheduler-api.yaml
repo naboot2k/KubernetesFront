@@ -33,6 +33,8 @@ spec:
               value: nginx:1.27-alpine
             - name: TEST_POD_COUNT_LIMIT
               value: "50"
+            - name: METRICS_POLL_INTERVAL_MS
+              value: "3000"
           readinessProbe:
             httpGet:
               path: /healthz

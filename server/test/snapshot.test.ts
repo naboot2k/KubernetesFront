@@ -77,3 +77,33 @@ test('buildSnapshot separates pending and bound pods', () => {
   assert.equal(snapshot.nodes[0].usedCpu, 0.5);
   assert.equal(snapshot.nodes[0].usedMem, 0.5);
 });
+
+test('buildSnapshot keeps request usage separate from live observed metrics', () => {
+  const node: V1Node = {
+    metadata: {
+      name: 'node-a',
+    },
+    status: {
+      allocatable: {
+        cpu: '4',
+        memory: '8Gi',
+      },
+    },
+  };
+  const bound = pod({
+    spec: { schedulerName, nodeName: 'node-a', containers: pod({}).spec?.containers ?? [] },
+    status: { phase: 'Running' },
+  });
+  const snapshot = buildSnapshot(
+    [node],
+    [bound],
+    schedulerName,
+    new Map([['node-a', { cpu: 0.12, mem: 1.25, observedAt: new Date('2026-06-10T00:00:00Z').getTime() }]]),
+  );
+
+  assert.equal(snapshot.nodes[0].usedCpu, 0.5);
+  assert.equal(snapshot.nodes[0].usedMem, 0.5);
+  assert.equal(snapshot.nodes[0].observedCpu, 0.12);
+  assert.equal(snapshot.nodes[0].observedMem, 1.25);
+  assert.equal(snapshot.nodes[0].metricsSource, 'metrics-server');
+});

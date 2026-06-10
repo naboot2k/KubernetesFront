@@ -18,6 +18,7 @@ import { LiveQueue } from './components/LiveQueue';
 import { NodeTopologyMatrix } from './components/NodeTopologyMatrix';
 import { TerminalLog } from './components/TerminalLog';
 import { TopConsole } from './components/TopConsole';
+import { formatResourceValue } from './utils/format';
 import type {
   ClusterNode,
   K8sConnectionStatus,
@@ -123,11 +124,13 @@ export default function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setTelemetry(createTelemetry(nodes));
+      if (runtimeMode === 'mock') {
+        setTelemetry(createTelemetry(nodes));
+      }
     }, 900);
 
     return () => window.clearInterval(timer);
-  }, [nodes]);
+  }, [nodes, runtimeMode]);
 
   const registerNodeRef = useCallback((nodeId: string, element: HTMLElement | null) => {
     if (element) {
@@ -257,8 +260,8 @@ export default function App() {
         (sum, node) => ({
           cpu: sum.cpu + node.capacityCpu,
           mem: sum.mem + node.capacityMem,
-          usedCpu: sum.usedCpu + node.usedCpu,
-          usedMem: sum.usedMem + node.usedMem,
+          usedCpu: sum.usedCpu + (node.observedCpu ?? node.usedCpu),
+          usedMem: sum.usedMem + (node.observedMem ?? node.usedMem),
         }),
         { cpu: 0, mem: 0, usedCpu: 0, usedMem: 0 },
       ),
@@ -297,7 +300,7 @@ export default function App() {
 
         <NodeTopologyMatrix
           nodes={nodes}
-          telemetry={telemetry}
+          telemetry={runtimeMode === 'mock' ? telemetry : {}}
           registerNodeRef={registerNodeRef}
           onRemovePod={handleRemovePod}
         />
@@ -306,17 +309,17 @@ export default function App() {
       <div className="grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-[320px_1fr]">
         <section className="hidden rounded-lg border border-white/10 bg-zinc-950/76 p-3 backdrop-blur xl:block">
           <div className="mb-3 text-xs font-semibold text-zinc-400">Cluster Aggregate</div>
-          <div className="grid grid-cols-2 gap-2 font-mono text-xs">
-            <div className="rounded-md border border-teal-300/20 bg-teal-300/10 p-3 text-teal-100">
-              <div className="text-zinc-500">CPU</div>
-              <div className="mt-1 text-lg font-semibold">
-                {totalCapacity.usedCpu}/{totalCapacity.cpu}c
+          <div className="space-y-2 font-mono text-xs">
+            <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-teal-300/20 bg-teal-300/10 px-3 py-2.5 text-teal-100">
+              <div className="shrink-0 text-zinc-500">CPU</div>
+              <div className="min-w-0 whitespace-nowrap text-right text-[15px] font-semibold">
+                {formatResourceValue(totalCapacity.usedCpu)}/{formatResourceValue(totalCapacity.cpu)}c
               </div>
             </div>
-            <div className="rounded-md border border-amber-300/20 bg-amber-300/10 p-3 text-amber-100">
-              <div className="text-zinc-500">MEM</div>
-              <div className="mt-1 text-lg font-semibold">
-                {totalCapacity.usedMem}/{totalCapacity.mem}G
+            <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-amber-300/20 bg-amber-300/10 px-3 py-2.5 text-amber-100">
+              <div className="shrink-0 text-zinc-500">MEM</div>
+              <div className="min-w-0 whitespace-nowrap text-right text-[15px] font-semibold">
+                {formatResourceValue(totalCapacity.usedMem)}/{formatResourceValue(totalCapacity.mem)}G
               </div>
             </div>
           </div>

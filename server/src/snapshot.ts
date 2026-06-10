@@ -1,4 +1,5 @@
 import type { V1Node, V1Pod } from '@kubernetes/client-node';
+import type { NodeUsageMap } from './metrics.js';
 import { parseCpu, parseMemoryGiB } from './quantity.js';
 import type { ClusterNode, K8sSnapshot, Priority, ScheduledPod, Task } from './types.js';
 
@@ -71,7 +72,7 @@ function nodeRole(node: V1Node) {
   return roleLabel.replace('node-role.kubernetes.io/', '') || 'worker';
 }
 
-export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[]): ClusterNode[] {
+export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[], usageByNode: NodeUsageMap = new Map()): ClusterNode[] {
   return nodes.map((node) => {
     const nodeName = node.metadata?.name ?? 'unknown-node';
     const residentPods = pods.filter((pod) => pod.spec?.nodeName === nodeName);
@@ -87,6 +88,7 @@ export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[]): ClusterNode[] {
     );
 
     const labels = getLabels(node.metadata);
+    const observed = usageByNode.get(nodeName);
 
     return {
       id: nodeName,
@@ -95,6 +97,10 @@ export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[]): ClusterNode[] {
       role: nodeRole(node),
       capacityCpu: parseCpu(node.status?.allocatable?.cpu ?? node.status?.capacity?.cpu),
       capacityMem: parseMemoryGiB(node.status?.allocatable?.memory ?? node.status?.capacity?.memory),
+      observedCpu: observed?.cpu,
+      observedMem: observed?.mem,
+      observedAt: observed?.observedAt,
+      metricsSource: observed ? 'metrics-server' : undefined,
       usedCpu: used.cpu,
       usedMem: used.mem,
       pods: residentPods.map(mapPodToScheduledPod),
@@ -102,9 +108,14 @@ export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[]): ClusterNode[] {
   });
 }
 
-export function buildSnapshot(nodes: V1Node[], pods: V1Pod[], schedulerName: string): K8sSnapshot {
+export function buildSnapshot(
+  nodes: V1Node[],
+  pods: V1Pod[],
+  schedulerName: string,
+  usageByNode: NodeUsageMap = new Map(),
+): K8sSnapshot {
   return {
-    nodes: mapNodesAndPods(nodes, pods),
+    nodes: mapNodesAndPods(nodes, pods, usageByNode),
     pendingQueue: pods.filter((pod) => isPendingForScheduler(pod, schedulerName)).map(mapPodToTask),
     failedTasks: [],
   };

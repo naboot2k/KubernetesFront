@@ -23,6 +23,10 @@ export interface ClusterNode {
   role: string;
   capacityCpu: number;
   capacityMem: number;
+  observedCpu?: number;
+  observedMem?: number;
+  observedAt?: number;
+  metricsSource?: 'metrics-server';
   usedCpu: number;
   usedMem: number;
   pods: ScheduledPod[];

@@ -5,12 +5,15 @@ import { z } from 'zod';
 import { config } from './config.js';
 import { addEventClient, broadcast, removeEventClient, sendEvent } from './events.js';
 import { createK8sClients } from './k8sClient.js';
+import { mapNodeMetrics } from './metrics.js';
 import { buildSnapshot } from './snapshot.js';
 import { decideTargetNode } from './scheduler.js';
 import type { K8sSnapshot, SchedulerStrategy, Task } from './types.js';
 
 const app = express();
 const clients = createK8sClients();
+let metricsAvailable = false;
+let lastMetricsError: string | null = null;
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -79,13 +82,45 @@ async function listPods() {
   return podList.items ?? [];
 }
 
+async function listNodeUsageMetrics() {
+  try {
+    const metrics = await clients.metrics.getNodeMetrics();
+
+    if (!metricsAvailable) {
+      broadcast({
+        type: 'log',
+        message: 'Metrics Server 已连接: 节点资源条切换为真实 CPU/内存使用率',
+        tone: 'success',
+      });
+    }
+
+    metricsAvailable = true;
+    lastMetricsError = null;
+    return mapNodeMetrics(metrics);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知 Metrics API 错误';
+
+    if (metricsAvailable || lastMetricsError !== message) {
+      broadcast({
+        type: 'log',
+        message: `Metrics Server 不可用，资源条回退为 Pod requests 汇总: ${message}`,
+        tone: 'warning',
+      });
+    }
+
+    metricsAvailable = false;
+    lastMetricsError = message;
+    return mapNodeMetrics();
+  }
+}
+
 async function readPod(namespace: string, name: string) {
   return callCore<V1Pod>('readNamespacedPod', { name, namespace });
 }
 
 async function currentSnapshot(): Promise<K8sSnapshot> {
-  const [nodes, pods] = await Promise.all([listNodes(), listPods()]);
-  return buildSnapshot(nodes, pods, config.schedulerName);
+  const [nodes, pods, usageByNode] = await Promise.all([listNodes(), listPods(), listNodeUsageMetrics()]);
+  return buildSnapshot(nodes, pods, config.schedulerName, usageByNode);
 }
 
 async function broadcastSnapshot() {
@@ -234,6 +269,8 @@ app.get('/healthz', (_request, response) => {
     ok: true,
     namespace: config.namespace,
     schedulerName: config.schedulerName,
+    metricsAvailable,
+    lastMetricsError,
   });
 });
 
@@ -366,7 +403,21 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 app.listen(config.port, () => {
   console.log(`k8s-scheduler-api listening on :${config.port}`);
   console.log(`namespace=${config.namespace} schedulerName=${config.schedulerName}`);
+  console.log(`metricsPollIntervalMs=${config.metricsPollIntervalMs}`);
 
   void startWatch(`/api/v1/namespaces/${config.namespace}/pods`, 'pods');
   void startWatch('/api/v1/nodes', 'nodes');
+
+  if (config.metricsPollIntervalMs > 0) {
+    setInterval(() => {
+      void broadcastSnapshot().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : '未知错误';
+        broadcast({
+          type: 'log',
+          message: `metrics snapshot 刷新失败: ${message}`,
+          tone: 'warning',
+        });
+      });
+    }, config.metricsPollIntervalMs);
+  }
 });

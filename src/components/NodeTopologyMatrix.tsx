@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { Server, Trash2 } from 'lucide-react';
 import type { ClusterNode, NodeTelemetry } from '../types/scheduler';
-import { clamp, percent } from '../utils/format';
+import { clamp, formatResourceValue, percent } from '../utils/format';
 
 interface NodeTopologyMatrixProps {
   nodes: ClusterNode[];
@@ -13,23 +13,28 @@ interface NodeTopologyMatrixProps {
 interface ResourceBarProps {
   label: string;
   used: number;
+  observed?: number;
   capacity: number;
   noise: number;
   unit: string;
   tone: 'cpu' | 'mem';
 }
 
-function ResourceBar({ label, used, capacity, noise, unit, tone }: ResourceBarProps) {
-  const observed = clamp(used + noise, 0, capacity);
-  const value = percent(observed, capacity);
+function ResourceBar({ label, used, observed, capacity, noise, unit, tone }: ResourceBarProps) {
+  const hasLiveMetric = observed !== undefined;
+  const displayed = clamp(hasLiveMetric ? observed : used + noise, 0, capacity);
+  const value = percent(displayed, capacity);
   const gradient = tone === 'cpu' ? 'from-teal-300 to-emerald-400' : 'from-amber-300 to-rose-400';
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-zinc-400">
-        <span>{label}</span>
         <span>
-          {observed.toFixed(1)} / {capacity}
+          {label}
+          {hasLiveMetric ? <span className="ml-1 text-emerald-300">live</span> : <span className="ml-1 text-zinc-600">requests</span>}
+        </span>
+        <span className="min-w-0 truncate">
+          {formatResourceValue(displayed)} / {formatResourceValue(capacity)}
           {unit}
         </span>
       </div>
@@ -55,7 +60,7 @@ export function NodeTopologyMatrix({
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-50">Node Topology Matrix</h2>
-          <p className="mt-1 text-xs text-zinc-500">4 个物理节点 · 实时资源视图</p>
+          <p className="mt-1 text-xs text-zinc-500">{nodes.length} 个物理节点 · 实时资源视图</p>
         </div>
         <span className="rounded border border-emerald-300/30 bg-emerald-300/10 px-2 py-1 font-mono text-xs text-emerald-100">
           Ready
@@ -94,6 +99,7 @@ export function NodeTopologyMatrix({
                 <ResourceBar
                   label="CPU"
                   used={node.usedCpu}
+                  observed={node.observedCpu}
                   capacity={node.capacityCpu}
                   noise={signal.cpuNoise}
                   unit="c"
@@ -102,6 +108,7 @@ export function NodeTopologyMatrix({
                 <ResourceBar
                   label="MEM"
                   used={node.usedMem}
+                  observed={node.observedMem}
                   capacity={node.capacityMem}
                   noise={signal.memNoise}
                   unit="G"

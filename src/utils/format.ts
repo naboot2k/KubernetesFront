@@ -25,3 +25,12 @@ export function percent(used: number, capacity: number) {
   if (capacity <= 0) return 0;
   return Math.round((used / capacity) * 100);
 }
+
+export function formatResourceValue(value: number, digits = 2) {
+  if (!Number.isFinite(value)) return '0';
+
+  return Number(value.toFixed(digits)).toLocaleString('en-US', {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  });
+}
