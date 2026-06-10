@@ -1,7 +1,5 @@
 export type SchedulerStrategy = 'LeastRequested' | 'MostRequested';
-
-export type RuntimeMode = 'mock' | 'k8s';
-
+export type Priority = 'low' | 'normal' | 'high';
 export type LogTone = 'info' | 'success' | 'warning' | 'error' | 'muted';
 
 export interface Task {
@@ -11,7 +9,7 @@ export interface Task {
   reqMem: number;
   createdAt: number;
   image: string;
-  priority: 'low' | 'normal' | 'high';
+  priority: Priority;
 }
 
 export interface ScheduledPod extends Task {
@@ -35,30 +33,10 @@ export interface FailedTask extends Task {
   reason: string;
 }
 
-export interface LogEntry {
-  id: string;
-  timestamp: number;
-  tone: LogTone;
-  message: string;
-}
-
-export interface BrokerState {
-  phase: 'idle' | 'decision' | 'flying';
-  task: Task | null;
-  targetNodeId?: string;
-  score?: number;
-}
-
-export interface ActiveFlight {
-  id: string;
-  task: Task;
-  targetNodeId: string;
-  score: number;
-}
-
-export interface NodeTelemetry {
-  cpuNoise: number;
-  memNoise: number;
+export interface K8sSnapshot {
+  nodes: ClusterNode[];
+  pendingQueue: Task[];
+  failedTasks: FailedTask[];
 }
 
 export interface SchedulerDecision {
@@ -67,15 +45,7 @@ export interface SchedulerDecision {
   reason?: string;
 }
 
-export interface K8sSnapshot {
-  nodes: ClusterNode[];
-  pendingQueue: Task[];
-  failedTasks?: FailedTask[];
-}
-
-export type K8sConnectionStatus = 'mock' | 'connecting' | 'connected' | 'disconnected' | 'error';
-
-export interface K8sStreamEvent {
+export interface StreamEvent {
   type: 'snapshot' | 'task' | 'nodeUpdate' | 'failed' | 'log';
   nodes?: ClusterNode[];
   pendingQueue?: Task[];

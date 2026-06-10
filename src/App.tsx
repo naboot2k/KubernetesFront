@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  bindK8sTask,
+  createK8sBurst,
+  deleteK8sPod,
+  getK8sApiBaseUrl,
+  requestK8sSchedule,
+} from './api/k8sApi';
 import { createTaskBurst } from './data/tasks';
 import { initialNodes } from './data/cluster';
+import { useK8sRealtimeBridge } from './hooks/useK8sRealtimeBridge';
 import { useSchedulerEngine } from './hooks/useSchedulerEngine';
 import { useTaskIngestion } from './hooks/useTaskIngestion';
 import { FailedQueue } from './components/FailedQueue';
@@ -10,7 +18,16 @@ import { LiveQueue } from './components/LiveQueue';
 import { NodeTopologyMatrix } from './components/NodeTopologyMatrix';
 import { TerminalLog } from './components/TerminalLog';
 import { TopConsole } from './components/TopConsole';
-import type { ClusterNode, LogEntry, LogTone, NodeTelemetry, SchedulerStrategy, Task } from './types/scheduler';
+import type {
+  ClusterNode,
+  K8sConnectionStatus,
+  LogEntry,
+  LogTone,
+  NodeTelemetry,
+  RuntimeMode,
+  SchedulerStrategy,
+  Task,
+} from './types/scheduler';
 
 interface LogPayload {
   message: string;
@@ -45,6 +62,8 @@ function createTelemetry(nodes: ClusterNode[]): Record<string, NodeTelemetry> {
 }
 
 export default function App() {
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>('mock');
+  const [connectionStatus, setConnectionStatus] = useState<K8sConnectionStatus>('mock');
   const [trafficEnabled, setTrafficEnabled] = useState(false);
   const [intervalMs, setIntervalMs] = useState(1400);
   const [strategy, setStrategy] = useState<SchedulerStrategy>('LeastRequested');
@@ -72,18 +91,29 @@ export default function App() {
   );
 
   useTaskIngestion({
-    enabled: trafficEnabled,
+    enabled: runtimeMode === 'mock' && trafficEnabled,
     intervalMs,
     onTask: ingestTask,
   });
 
+  useK8sRealtimeBridge({
+    mode: runtimeMode,
+    setNodes,
+    setPendingQueue,
+    setConnectionStatus,
+    onLog: appendLog,
+  });
+
   const scheduler = useSchedulerEngine({
+    mode: runtimeMode,
     pendingQueue,
     setPendingQueue,
     nodes,
     setNodes,
     strategy,
     onLog: appendLog,
+    decideTask: runtimeMode === 'k8s' ? requestK8sSchedule : undefined,
+    commitBinding: runtimeMode === 'k8s' ? bindK8sTask : undefined,
   });
 
   useEffect(() => {
@@ -108,7 +138,54 @@ export default function App() {
     nodeRefs.current.delete(nodeId);
   }, []);
 
+  const handleModeChange = useCallback(
+    (mode: RuntimeMode) => {
+      setRuntimeMode(mode);
+      setTrafficEnabled(false);
+      setPendingQueue([]);
+
+      if (mode === 'mock') {
+        setNodes(initialNodes);
+        setConnectionStatus('mock');
+        appendLog({
+          message: '已切换到模拟沙箱模式',
+          tone: 'muted',
+        });
+        return;
+      }
+
+      appendLog({
+        message: `已切换到真实 K8s 模式，正在连接 ${getK8sApiBaseUrl()}`,
+        tone: 'warning',
+      });
+    },
+    [appendLog],
+  );
+
   const handleBurst = useCallback(() => {
+    if (runtimeMode === 'k8s') {
+      void createK8sBurst(10)
+        .then((result) => {
+          const tasks = result.tasks ?? [];
+
+          if (tasks.length > 0) {
+            setPendingQueue((current) => [...current, ...tasks]);
+          }
+
+          appendLog({
+            message: `⚡ 已请求真实集群创建 ${tasks.length || 10} 个测试 Pod`,
+            tone: 'warning',
+          });
+        })
+        .catch((error: Error) => {
+          appendLog({
+            message: `❌ 创建真实测试 Pod 失败: ${error.message}`,
+            tone: 'error',
+          });
+        });
+      return;
+    }
+
     const burst = createTaskBurst(10);
 
     setPendingQueue((current) => [...current, ...burst]);
@@ -117,10 +194,31 @@ export default function App() {
       createLog('⚡ 手动突发: 10 个高并发任务同时涌入', 'warning'),
       ...burst.map((task) => createLog(formatIngress(task), 'info')),
     ]);
-  }, []);
+  }, [appendLog, runtimeMode]);
 
   const handleRemovePod = useCallback(
     (nodeId: string, taskId: string) => {
+      if (runtimeMode === 'k8s') {
+        void deleteK8sPod(nodeId, taskId)
+          .then((result) => {
+            if (result.nodes) {
+              setNodes(result.nodes);
+            }
+
+            appendLog({
+              message: `🧹 已请求真实集群删除 Pod: ${taskId}`,
+              tone: 'muted',
+            });
+          })
+          .catch((error: Error) => {
+            appendLog({
+              message: `❌ 删除真实 Pod 失败: ${taskId} (${error.message})`,
+              tone: 'error',
+            });
+          });
+        return;
+      }
+
       let removed: Task | null = null;
 
       setNodes((current) =>
@@ -150,7 +248,7 @@ export default function App() {
         });
       }, 0);
     },
-    [appendLog],
+    [appendLog, runtimeMode],
   );
 
   const totalCapacity = useMemo(
@@ -170,11 +268,14 @@ export default function App() {
   return (
     <main className="flex min-h-screen flex-col gap-3 overflow-y-auto p-3 text-zinc-100 md:p-4 xl:h-screen xl:min-h-0 xl:overflow-hidden">
       <TopConsole
+        mode={runtimeMode}
+        connectionStatus={connectionStatus}
         enabled={trafficEnabled}
         intervalMs={intervalMs}
         strategy={strategy}
         pendingCount={pendingQueue.length}
         failedCount={scheduler.failedTasks.length}
+        onModeChange={handleModeChange}
         onToggle={() => setTrafficEnabled((enabled) => !enabled)}
         onIntervalChange={setIntervalMs}
         onBurst={handleBurst}

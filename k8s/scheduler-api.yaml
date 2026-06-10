@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-scheduler-api
+  namespace: scheduler-demo
+  labels:
+    app: k8s-scheduler-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-scheduler-api
+  template:
+    metadata:
+      labels:
+        app: k8s-scheduler-api
+    spec:
+      serviceAccountName: k8s-scheduler-api
+      containers:
+        - name: api
+          image: your-registry/k8s-scheduler-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: K8S_NAMESPACE
+              value: scheduler-demo
+            - name: K8S_SCHEDULER_NAME
+              value: demo-scheduler
+            - name: TEST_POD_IMAGE
+              value: nginx:1.27-alpine
+            - name: TEST_POD_COUNT_LIMIT
+              value: "50"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-scheduler-api
+  namespace: scheduler-demo
+  labels:
+    app: k8s-scheduler-api
+spec:
+  selector:
+    app: k8s-scheduler-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

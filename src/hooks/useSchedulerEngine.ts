@@ -10,6 +10,8 @@ import type {
   ClusterNode,
   FailedTask,
   LogTone,
+  RuntimeMode,
+  SchedulerDecision,
   SchedulerStrategy,
   Task,
 } from '../types/scheduler';
@@ -20,12 +22,15 @@ interface LogPayload {
 }
 
 interface UseSchedulerEngineOptions {
+  mode: RuntimeMode;
   pendingQueue: Task[];
   setPendingQueue: Dispatch<SetStateAction<Task[]>>;
   nodes: ClusterNode[];
   setNodes: Dispatch<SetStateAction<ClusterNode[]>>;
   strategy: SchedulerStrategy;
   onLog: (payload: LogPayload) => void;
+  decideTask?: (task: Task, nodes: ClusterNode[], strategy: SchedulerStrategy) => Promise<SchedulerDecision>;
+  commitBinding?: (flight: ActiveFlight, strategy: SchedulerStrategy) => Promise<{ nodes?: ClusterNode[] } | void>;
 }
 
 function flightId(task: Task) {
@@ -33,12 +38,15 @@ function flightId(task: Task) {
 }
 
 export function useSchedulerEngine({
+  mode,
   pendingQueue,
   setPendingQueue,
   nodes,
   setNodes,
   strategy,
   onLog,
+  decideTask,
+  commitBinding,
 }: UseSchedulerEngineOptions) {
   const [brokerState, setBrokerState] = useState<BrokerState>({ phase: 'idle', task: null });
   const [activeFlight, setActiveFlight] = useState<ActiveFlight | null>(null);
@@ -49,6 +57,9 @@ export function useSchedulerEngine({
   const mountedRef = useRef(true);
   const nodesRef = useRef(nodes);
   const strategyRef = useRef(strategy);
+  const modeRef = useRef(mode);
+  const decideTaskRef = useRef(decideTask);
+  const commitBindingRef = useRef(commitBinding);
   const activeFlightRef = useRef(activeFlight);
   const timersRef = useRef<number[]>([]);
 
@@ -59,6 +70,18 @@ export function useSchedulerEngine({
   useEffect(() => {
     strategyRef.current = strategy;
   }, [strategy]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    decideTaskRef.current = decideTask;
+  }, [decideTask]);
+
+  useEffect(() => {
+    commitBindingRef.current = commitBinding;
+  }, [commitBinding]);
 
   useEffect(() => {
     activeFlightRef.current = activeFlight;
@@ -97,14 +120,42 @@ export function useSchedulerEngine({
       tone: 'warning',
     });
 
-    const timer = window.setTimeout(() => {
+    const timer = window.setTimeout(async () => {
       if (!mountedRef.current) return;
 
       const nodesSnapshot = nodesRef.current;
-      const selectedNodeId = predictTargetNode(task, nodesSnapshot, strategyRef.current);
+      let decision: SchedulerDecision;
+
+      try {
+        decision = decideTaskRef.current
+          ? await decideTaskRef.current(task, nodesSnapshot, strategyRef.current)
+          : {
+              targetNodeId: predictTargetNode(task, nodesSnapshot, strategyRef.current),
+            };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '未知错误';
+
+        setFailedTasks((current) => [
+          {
+            ...task,
+            failedAt: Date.now(),
+            reason: `调度后端不可用: ${message}`,
+          },
+          ...current,
+        ]);
+        setBrokerState({ phase: 'idle', task: null });
+        onLog({
+          message: `❌ 调度失败: ${task.name} 无法从 K8s 调度后端获得决策 (${message})`,
+          tone: 'error',
+        });
+        releaseEngine();
+        return;
+      }
+
+      const selectedNodeId = decision.targetNodeId;
 
       if (!selectedNodeId) {
-        const reason = getFailureReason(task, nodesSnapshot);
+        const reason = decision.reason ?? getFailureReason(task, nodesSnapshot);
 
         setFailedTasks((current) => [
           {
@@ -129,7 +180,7 @@ export function useSchedulerEngine({
       }
 
       const targetNode = nodesSnapshot.find((node) => node.id === selectedNodeId);
-      const score = targetNode ? scoreNode(task, targetNode, strategyRef.current) : 1;
+      const score = decision.score ?? (targetNode ? scoreNode(task, targetNode, strategyRef.current) : 1);
 
       setBrokerState({
         phase: 'flying',
@@ -173,8 +224,28 @@ export function useSchedulerEngine({
         }),
       );
 
+      const commit = commitBindingRef.current;
+
+      if (commit) {
+        void commit(flight, strategyRef.current)
+          .then((result) => {
+            if (result?.nodes) {
+              setNodes(result.nodes);
+            }
+          })
+          .catch((error: Error) => {
+            onLog({
+              message: `❌ K8s Binding API 调用失败: ${flight.task.name} -> ${flight.targetNodeId} (${error.message})`,
+              tone: 'error',
+            });
+          });
+      }
+
       onLog({
-        message: `🚀 成功绑定: ${flight.task.name} -> ${flight.targetNodeId} (分值: ${flight.score})`,
+        message:
+          modeRef.current === 'k8s'
+            ? `🚀 已提交真实绑定: ${flight.task.name} -> ${flight.targetNodeId} (分值: ${flight.score})`
+            : `🚀 成功绑定: ${flight.task.name} -> ${flight.targetNodeId} (分值: ${flight.score})`,
         tone: 'success',
       });
       setActiveFlight(null);
