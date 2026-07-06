@@ -7,6 +7,10 @@ export function sendEvent(response: Response, event: StreamEvent) {
   response.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+export function sendComment(response: Response, comment: string) {
+  response.write(`: ${comment}\n\n`);
+}
+
 export function addEventClient(response: Response) {
   clients.add(response);
 }

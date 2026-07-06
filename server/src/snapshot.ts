@@ -3,6 +3,10 @@ import type { NodeUsageMap } from './metrics.js';
 import { parseCpu, parseMemoryGiB } from './quantity.js';
 import type { ClusterNode, K8sSnapshot, Priority, ScheduledPod, Task } from './types.js';
 
+export interface SnapshotOptions {
+  podLimitPerNode?: number;
+}
+
 function getLabels(metadata?: { labels?: Record<string, string> }) {
   return metadata?.labels ?? {};
 }
@@ -72,10 +76,35 @@ function nodeRole(node: V1Node) {
   return roleLabel.replace('node-role.kubernetes.io/', '') || 'worker';
 }
 
-export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[], usageByNode: NodeUsageMap = new Map()): ClusterNode[] {
+function groupPodsByNode(pods: V1Pod[]) {
+  const grouped = new Map<string, V1Pod[]>();
+
+  for (const pod of pods) {
+    const nodeName = pod.spec?.nodeName;
+    if (!nodeName) continue;
+
+    const current = grouped.get(nodeName) ?? [];
+    current.push(pod);
+    grouped.set(nodeName, current);
+  }
+
+  return grouped;
+}
+
+export function mapNodesAndPods(
+  nodes: V1Node[],
+  pods: V1Pod[],
+  usageByNode: NodeUsageMap = new Map(),
+  options: SnapshotOptions = {},
+): ClusterNode[] {
+  const podsByNode = groupPodsByNode(pods);
+  const podLimitPerNode = options.podLimitPerNode;
+
   return nodes.map((node) => {
     const nodeName = node.metadata?.name ?? 'unknown-node';
-    const residentPods = pods.filter((pod) => pod.spec?.nodeName === nodeName);
+    const residentPods = podsByNode.get(nodeName) ?? [];
+    const visiblePods =
+      podLimitPerNode === undefined || podLimitPerNode < 0 ? residentPods : residentPods.slice(0, podLimitPerNode);
     const used = residentPods.reduce(
       (sum, pod) => {
         const resources = requestedResources(pod);
@@ -103,7 +132,8 @@ export function mapNodesAndPods(nodes: V1Node[], pods: V1Pod[], usageByNode: Nod
       metricsSource: observed ? 'metrics-server' : undefined,
       usedCpu: used.cpu,
       usedMem: used.mem,
-      pods: residentPods.map(mapPodToScheduledPod),
+      podCount: residentPods.length,
+      pods: visiblePods.map(mapPodToScheduledPod),
     };
   });
 }
@@ -113,9 +143,10 @@ export function buildSnapshot(
   pods: V1Pod[],
   schedulerName: string,
   usageByNode: NodeUsageMap = new Map(),
+  options: SnapshotOptions = {},
 ): K8sSnapshot {
   return {
-    nodes: mapNodesAndPods(nodes, pods, usageByNode),
+    nodes: mapNodesAndPods(nodes, pods, usageByNode, options),
     pendingQueue: pods.filter((pod) => isPendingForScheduler(pod, schedulerName)).map(mapPodToTask),
     failedTasks: [],
   };

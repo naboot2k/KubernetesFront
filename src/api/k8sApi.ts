@@ -9,6 +9,7 @@ import type {
 } from '../types/scheduler';
 
 const DEFAULT_API_BASE = '/api/k8s';
+const DEFAULT_POD_LIMIT_PER_NODE = 200;
 
 export function getK8sApiBaseUrl() {
   return import.meta.env.VITE_K8S_API_BASE_URL || DEFAULT_API_BASE;
@@ -21,9 +22,11 @@ function apiUrl(path: string) {
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), {
+    cache: 'no-store',
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache',
       ...init?.headers,
     },
   });
@@ -37,7 +40,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function fetchK8sSnapshot() {
-  return requestJson<K8sSnapshot>('/snapshot');
+  return requestJson<K8sSnapshot>(`/snapshot?podLimitPerNode=${DEFAULT_POD_LIMIT_PER_NODE}`);
 }
 
 export function requestK8sSchedule(task: Task, nodes: ClusterNode[], strategy: SchedulerStrategy) {
@@ -59,10 +62,10 @@ export async function bindK8sTask(flight: ActiveFlight, strategy: SchedulerStrat
   });
 }
 
-export function deleteK8sPod(nodeId: string, taskId: string) {
+export function deleteK8sPod(nodeId: string, taskId: string, confirmed: true) {
   return requestJson<{ nodes?: ClusterNode[] }>('/pods/delete', {
     method: 'POST',
-    body: JSON.stringify({ nodeId, taskId }),
+    body: JSON.stringify({ nodeId, taskId, confirmed }),
   });
 }
 
@@ -74,7 +77,7 @@ export function createK8sBurst(count: number) {
 }
 
 export function openK8sEventStream(onEvent: (event: K8sStreamEvent) => void, onError: () => void) {
-  const source = new EventSource(apiUrl('/events'));
+  const source = new EventSource(apiUrl('/events?initial=false'));
 
   source.onmessage = (event) => {
     try {

@@ -1,4 +1,4 @@
-export type SchedulerStrategy = 'LeastRequested' | 'MostRequested';
+export type SchedulerStrategy = 'ClassicScheduler' | 'LLMScheduler';
 
 export type RuntimeMode = 'mock' | 'k8s';
 
@@ -31,6 +31,7 @@ export interface ClusterNode {
   metricsSource?: 'metrics-server';
   usedCpu: number;
   usedMem: number;
+  podCount?: number;
   pods: ScheduledPod[];
 }
 

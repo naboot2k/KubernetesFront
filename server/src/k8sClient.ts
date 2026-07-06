@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import * as k8s from '@kubernetes/client-node';
 import { Metrics } from '@kubernetes/client-node/dist/metrics.js';
 
@@ -10,10 +11,13 @@ export interface K8sClients {
 
 export function createK8sClients(): K8sClients {
   const kc = new k8s.KubeConfig();
+  const hasServiceAccount =
+    existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token') &&
+    existsSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
 
-  try {
+  if (hasServiceAccount) {
     kc.loadFromCluster();
-  } catch {
+  } else {
     kc.loadFromDefault();
   }
 

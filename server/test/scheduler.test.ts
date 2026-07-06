@@ -38,17 +38,43 @@ const nodes: ClusterNode[] = [
   },
 ];
 
-test('LeastRequested chooses the least loaded node', () => {
-  assert.equal(decideTargetNode(task, nodes, 'LeastRequested').targetNodeId, 'node-a');
+test('ClassicScheduler chooses the least loaded balanced node', () => {
+  const decision = decideTargetNode(task, nodes, 'ClassicScheduler');
+
+  assert.equal(decision.targetNodeId, 'node-a');
+  assert.equal(decision.reason, 'classic resource fit and balance score');
 });
 
-test('MostRequested chooses the most loaded node that still fits', () => {
-  assert.equal(decideTargetNode(task, nodes, 'MostRequested').targetNodeId, 'node-b');
+test('LLMScheduler avoids dense control-plane nodes for latency sensitive workloads', () => {
+  const llmNodes: ClusterNode[] = [
+    {
+      ...nodes[0],
+      role: 'control-plane',
+      podCount: 300,
+    },
+    {
+      ...nodes[1],
+      usedCpu: 1,
+      usedMem: 1,
+      role: 'worker',
+      podCount: 12,
+    },
+  ];
+  const webTask = {
+    ...task,
+    name: 'pod-nginx-api',
+    image: 'nginx:1.27-alpine',
+    priority: 'high' as const,
+  };
+  const decision = decideTargetNode(webTask, llmNodes, 'LLMScheduler');
+
+  assert.equal(decision.targetNodeId, 'node-b');
+  assert.equal(decision.reason, 'local LLM-style workload reasoning');
 });
 
 test('returns null when no node fits', () => {
   const heavy = { ...task, reqCpu: 99 };
-  const decision = decideTargetNode(heavy, nodes, 'LeastRequested');
+  const decision = decideTargetNode(heavy, nodes, 'ClassicScheduler');
 
   assert.equal(decision.targetNodeId, null);
   assert.equal(decision.reason, 'CPU 不足');

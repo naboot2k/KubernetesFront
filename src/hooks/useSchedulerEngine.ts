@@ -31,10 +31,17 @@ interface UseSchedulerEngineOptions {
   onLog: (payload: LogPayload) => void;
   decideTask?: (task: Task, nodes: ClusterNode[], strategy: SchedulerStrategy) => Promise<SchedulerDecision>;
   commitBinding?: (flight: ActiveFlight, strategy: SchedulerStrategy) => Promise<{ nodes?: ClusterNode[] } | void>;
+  onTaskClaimed?: (task: Task) => void;
+  onTaskFailed?: (task: Task) => void;
+  onTaskRetry?: (task: Task) => void;
 }
 
 function flightId(task: Task) {
   return `flight-${task.id}-${Date.now()}`;
+}
+
+function strategyLabel(strategy: SchedulerStrategy) {
+  return strategy === 'LLMScheduler' ? 'LLM 调度算法' : '经典调度算法';
 }
 
 export function useSchedulerEngine({
@@ -47,6 +54,9 @@ export function useSchedulerEngine({
   onLog,
   decideTask,
   commitBinding,
+  onTaskClaimed,
+  onTaskFailed,
+  onTaskRetry,
 }: UseSchedulerEngineOptions) {
   const [brokerState, setBrokerState] = useState<BrokerState>({ phase: 'idle', task: null });
   const [activeFlight, setActiveFlight] = useState<ActiveFlight | null>(null);
@@ -60,6 +70,9 @@ export function useSchedulerEngine({
   const modeRef = useRef(mode);
   const decideTaskRef = useRef(decideTask);
   const commitBindingRef = useRef(commitBinding);
+  const onTaskClaimedRef = useRef(onTaskClaimed);
+  const onTaskFailedRef = useRef(onTaskFailed);
+  const onTaskRetryRef = useRef(onTaskRetry);
   const activeFlightRef = useRef(activeFlight);
   const timersRef = useRef<number[]>([]);
 
@@ -84,6 +97,18 @@ export function useSchedulerEngine({
   }, [commitBinding]);
 
   useEffect(() => {
+    onTaskClaimedRef.current = onTaskClaimed;
+  }, [onTaskClaimed]);
+
+  useEffect(() => {
+    onTaskFailedRef.current = onTaskFailed;
+  }, [onTaskFailed]);
+
+  useEffect(() => {
+    onTaskRetryRef.current = onTaskRetry;
+  }, [onTaskRetry]);
+
+  useEffect(() => {
     activeFlightRef.current = activeFlight;
   }, [activeFlight]);
 
@@ -101,6 +126,18 @@ export function useSchedulerEngine({
     };
   }, []);
 
+  const moveToFailed = useCallback((task: Task, reason: string) => {
+    onTaskFailedRef.current?.(task);
+    setFailedTasks((current) => [
+      {
+        ...task,
+        failedAt: Date.now(),
+        reason,
+      },
+      ...current.filter((item) => item.id !== task.id),
+    ]);
+  }, []);
+
   useEffect(() => {
     if (busyRef.current || activeFlightRef.current || pendingQueue.length === 0) {
       return;
@@ -108,6 +145,7 @@ export function useSchedulerEngine({
 
     const task = pendingQueue[0];
     busyRef.current = true;
+    onTaskClaimedRef.current?.(task);
 
     setPendingQueue((current) => {
       if (current[0]?.id !== task.id) return current;
@@ -116,7 +154,7 @@ export function useSchedulerEngine({
 
     setBrokerState({ phase: 'decision', task });
     onLog({
-      message: `⚡ 调度决策中... 选用 ${strategyRef.current} 策略`,
+      message: `⚡ 调度决策中... 选用 ${strategyLabel(strategyRef.current)}`,
       tone: 'warning',
     });
 
@@ -135,14 +173,7 @@ export function useSchedulerEngine({
       } catch (error) {
         const message = error instanceof Error ? error.message : '未知错误';
 
-        setFailedTasks((current) => [
-          {
-            ...task,
-            failedAt: Date.now(),
-            reason: `调度后端不可用: ${message}`,
-          },
-          ...current,
-        ]);
+        moveToFailed(task, `调度后端不可用: ${message}`);
         setBrokerState({ phase: 'idle', task: null });
         onLog({
           message: `❌ 调度失败: ${task.name} 无法从 K8s 调度后端获得决策 (${message})`,
@@ -157,14 +188,7 @@ export function useSchedulerEngine({
       if (!selectedNodeId) {
         const reason = decision.reason ?? getFailureReason(task, nodesSnapshot);
 
-        setFailedTasks((current) => [
-          {
-            ...task,
-            failedAt: Date.now(),
-            reason,
-          },
-          ...current,
-        ]);
+        moveToFailed(task, reason);
         setBrokerState({ phase: 'idle', task: null });
         onLog({
           message: `❌ 调度失败: ${task.name} 无法适配任何节点 (原因: ${reason})`,
@@ -197,7 +221,7 @@ export function useSchedulerEngine({
     }, 300);
 
     timersRef.current.push(timer);
-  }, [engineTick, onLog, pendingQueue, setPendingQueue, releaseEngine]);
+  }, [engineTick, moveToFailed, onLog, pendingQueue, setPendingQueue, releaseEngine]);
 
   const completeFlight = useCallback(
     (id: string) => {
@@ -234,6 +258,7 @@ export function useSchedulerEngine({
             }
           })
           .catch((error: Error) => {
+            moveToFailed(flight.task, `Binding API 调用失败: ${error.message}`);
             onLog({
               message: `❌ K8s Binding API 调用失败: ${flight.task.name} -> ${flight.targetNodeId} (${error.message})`,
               tone: 'error',
@@ -252,7 +277,7 @@ export function useSchedulerEngine({
       setBrokerState({ phase: 'idle', task: null });
       releaseEngine();
     },
-    [onLog, releaseEngine, setNodes],
+    [moveToFailed, onLog, releaseEngine, setNodes],
   );
 
   const retryFailedTask = useCallback(
@@ -261,8 +286,9 @@ export function useSchedulerEngine({
       if (!failedTask) return;
 
       setFailedTasks((current) => current.filter((task) => task.id !== taskId));
+      onTaskRetryRef.current?.(failedTask);
       setPendingQueue((current) => [
-        ...current,
+        ...current.filter((task) => task.id !== failedTask.id),
         {
           id: failedTask.id,
           name: failedTask.name,

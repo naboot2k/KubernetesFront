@@ -1,4 +1,4 @@
-export type SchedulerStrategy = 'LeastRequested' | 'MostRequested';
+export type SchedulerStrategy = 'ClassicScheduler' | 'LLMScheduler';
 export type Priority = 'low' | 'normal' | 'high';
 export type LogTone = 'info' | 'success' | 'warning' | 'error' | 'muted';
 
@@ -29,6 +29,7 @@ export interface ClusterNode {
   metricsSource?: 'metrics-server';
   usedCpu: number;
   usedMem: number;
+  podCount?: number;
   pods: ScheduledPod[];
 }
 

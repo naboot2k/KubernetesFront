@@ -6,11 +6,8 @@ import {
   getK8sApiBaseUrl,
   requestK8sSchedule,
 } from './api/k8sApi';
-import { createTaskBurst } from './data/tasks';
-import { initialNodes } from './data/cluster';
 import { useK8sRealtimeBridge } from './hooks/useK8sRealtimeBridge';
 import { useSchedulerEngine } from './hooks/useSchedulerEngine';
-import { useTaskIngestion } from './hooks/useTaskIngestion';
 import { FailedQueue } from './components/FailedQueue';
 import { FlyingTaskLayer } from './components/FlyingTaskLayer';
 import { LiveBroker } from './components/LiveBroker';
@@ -24,7 +21,6 @@ import type {
   K8sConnectionStatus,
   LogEntry,
   LogTone,
-  NodeTelemetry,
   RuntimeMode,
   SchedulerStrategy,
   Task,
@@ -46,56 +42,37 @@ function createLog(message: string, tone: LogTone = 'info'): LogEntry {
   };
 }
 
-function formatIngress(task: Task) {
-  return `📥 实时收到新任务: ${task.name} (CPU: ${task.reqCpu}, Mem: ${task.reqMem}G)`;
-}
-
-function createTelemetry(nodes: ClusterNode[]): Record<string, NodeTelemetry> {
-  return Object.fromEntries(
-    nodes.map((node) => [
-      node.id,
-      {
-        cpuNoise: Number((Math.random() * 0.9).toFixed(1)),
-        memNoise: Number((Math.random() * 3.6).toFixed(1)),
-      },
-    ]),
-  );
-}
+const runtimeMode: RuntimeMode = 'k8s';
+const schedulerStrategy: SchedulerStrategy = 'LLMScheduler';
+const noTelemetry = {};
 
 export default function App() {
-  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>('mock');
-  const [connectionStatus, setConnectionStatus] = useState<K8sConnectionStatus>('mock');
-  const [trafficEnabled, setTrafficEnabled] = useState(false);
-  const [intervalMs, setIntervalMs] = useState(1400);
-  const [strategy, setStrategy] = useState<SchedulerStrategy>('LeastRequested');
+  const [connectionStatus, setConnectionStatus] = useState<K8sConnectionStatus>('connecting');
   const [pendingQueue, setPendingQueue] = useState<Task[]>([]);
-  const [nodes, setNodes] = useState<ClusterNode[]>(initialNodes);
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>(() => [
-    createLog('系统就绪: Scheduler sandbox initialized', 'muted'),
+    createLog(`系统就绪: 正在连接真实 K8s 集群 ${getK8sApiBaseUrl()}`, 'muted'),
+    createLog('默认调度策略: LLM 调度算法', 'muted'),
   ]);
   const [now, setNow] = useState(Date.now());
-  const [telemetry, setTelemetry] = useState<Record<string, NodeTelemetry>>(() => createTelemetry(initialNodes));
 
   const brokerRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const k8sExcludedTaskIdsRef = useRef<Set<string>>(new Set());
 
   const appendLog = useCallback(({ message, tone = 'info' }: LogPayload) => {
     setLogs((current) => [...current.slice(-179), createLog(message, tone)]);
   }, []);
 
-  const ingestTask = useCallback(
-    (task: Task) => {
-      setPendingQueue((current) => [...current, task]);
-      appendLog({ message: formatIngress(task), tone: 'info' });
-    },
-    [appendLog],
-  );
+  const suppressK8sTask = useCallback((task: Task) => {
+    k8sExcludedTaskIdsRef.current.add(task.id);
+  }, []);
 
-  useTaskIngestion({
-    enabled: runtimeMode === 'mock' && trafficEnabled,
-    intervalMs,
-    onTask: ingestTask,
-  });
+  const releaseK8sTask = useCallback((task: Task) => {
+    k8sExcludedTaskIdsRef.current.delete(task.id);
+  }, []);
+
+  const shouldAcceptK8sTask = useCallback((task: Task) => !k8sExcludedTaskIdsRef.current.has(task.id), []);
 
   useK8sRealtimeBridge({
     mode: runtimeMode,
@@ -103,6 +80,7 @@ export default function App() {
     setPendingQueue,
     setConnectionStatus,
     onLog: appendLog,
+    shouldAcceptTask: shouldAcceptK8sTask,
   });
 
   const scheduler = useSchedulerEngine({
@@ -111,26 +89,19 @@ export default function App() {
     setPendingQueue,
     nodes,
     setNodes,
-    strategy,
+    strategy: schedulerStrategy,
     onLog: appendLog,
-    decideTask: runtimeMode === 'k8s' ? requestK8sSchedule : undefined,
-    commitBinding: runtimeMode === 'k8s' ? bindK8sTask : undefined,
+    decideTask: requestK8sSchedule,
+    commitBinding: bindK8sTask,
+    onTaskClaimed: suppressK8sTask,
+    onTaskFailed: suppressK8sTask,
+    onTaskRetry: releaseK8sTask,
   });
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (runtimeMode === 'mock') {
-        setTelemetry(createTelemetry(nodes));
-      }
-    }, 900);
-
-    return () => window.clearInterval(timer);
-  }, [nodes, runtimeMode]);
 
   const registerNodeRef = useCallback((nodeId: string, element: HTMLElement | null) => {
     if (element) {
@@ -141,117 +112,65 @@ export default function App() {
     nodeRefs.current.delete(nodeId);
   }, []);
 
-  const handleModeChange = useCallback(
-    (mode: RuntimeMode) => {
-      setRuntimeMode(mode);
-      setTrafficEnabled(false);
-      setPendingQueue([]);
+  const handleBurst = useCallback(() => {
+    void createK8sBurst(10)
+      .then((result) => {
+        const tasks = result.tasks ?? [];
 
-      if (mode === 'mock') {
-        setNodes(initialNodes);
-        setConnectionStatus('mock');
+        if (tasks.length > 0) {
+          tasks.forEach(releaseK8sTask);
+          setPendingQueue((current) => {
+            const knownTaskIds = new Set(current.map((task) => task.id));
+            return [...current, ...tasks.filter((task) => !knownTaskIds.has(task.id))];
+          });
+        }
+
         appendLog({
-          message: '已切换到模拟沙箱模式',
+          message: `⚡ 已请求真实集群创建 ${tasks.length || 10} 个测试 Pod`,
+          tone: 'warning',
+        });
+      })
+      .catch((error: Error) => {
+        appendLog({
+          message: `❌ 创建真实测试 Pod 失败: ${error.message}`,
+          tone: 'error',
+        });
+      });
+  }, [appendLog, releaseK8sTask]);
+
+  const handleRemovePod = useCallback(
+    (nodeId: string, taskId: string) => {
+      const confirmed = window.confirm(
+        `确认删除真实集群 Pod？\n\nPod: ${taskId}\nNode: ${nodeId}\n\n该操作会调用 Kubernetes API 删除该 Pod。`,
+      );
+
+      if (!confirmed) {
+        appendLog({
+          message: `已取消删除 Pod: ${taskId}`,
           tone: 'muted',
         });
         return;
       }
 
-      appendLog({
-        message: `已切换到真实 K8s 模式，正在连接 ${getK8sApiBaseUrl()}`,
-        tone: 'warning',
-      });
-    },
-    [appendLog],
-  );
-
-  const handleBurst = useCallback(() => {
-    if (runtimeMode === 'k8s') {
-      void createK8sBurst(10)
+      void deleteK8sPod(nodeId, taskId, true)
         .then((result) => {
-          const tasks = result.tasks ?? [];
-
-          if (tasks.length > 0) {
-            setPendingQueue((current) => [...current, ...tasks]);
+          if (result.nodes) {
+            setNodes(result.nodes);
           }
 
           appendLog({
-            message: `⚡ 已请求真实集群创建 ${tasks.length || 10} 个测试 Pod`,
-            tone: 'warning',
+            message: `🧹 已请求真实集群删除 Pod: ${taskId}`,
+            tone: 'muted',
           });
         })
         .catch((error: Error) => {
           appendLog({
-            message: `❌ 创建真实测试 Pod 失败: ${error.message}`,
+            message: `❌ 删除真实 Pod 失败: ${taskId} (${error.message})`,
             tone: 'error',
           });
         });
-      return;
-    }
-
-    const burst = createTaskBurst(10);
-
-    setPendingQueue((current) => [...current, ...burst]);
-    setLogs((current) => [
-      ...current.slice(-169),
-      createLog('⚡ 手动突发: 10 个高并发任务同时涌入', 'warning'),
-      ...burst.map((task) => createLog(formatIngress(task), 'info')),
-    ]);
-  }, [appendLog, runtimeMode]);
-
-  const handleRemovePod = useCallback(
-    (nodeId: string, taskId: string) => {
-      if (runtimeMode === 'k8s') {
-        void deleteK8sPod(nodeId, taskId)
-          .then((result) => {
-            if (result.nodes) {
-              setNodes(result.nodes);
-            }
-
-            appendLog({
-              message: `🧹 已请求真实集群删除 Pod: ${taskId}`,
-              tone: 'muted',
-            });
-          })
-          .catch((error: Error) => {
-            appendLog({
-              message: `❌ 删除真实 Pod 失败: ${taskId} (${error.message})`,
-              tone: 'error',
-            });
-          });
-        return;
-      }
-
-      let removed: Task | null = null;
-
-      setNodes((current) =>
-        current.map((node) => {
-          if (node.id !== nodeId) return node;
-
-          const pod = node.pods.find((item) => item.id === taskId);
-          if (!pod) return node;
-
-          removed = pod;
-
-          return {
-            ...node,
-            usedCpu: Math.max(0, node.usedCpu - pod.reqCpu),
-            usedMem: Math.max(0, node.usedMem - pod.reqMem),
-            pods: node.pods.filter((item) => item.id !== taskId),
-          };
-        }),
-      );
-
-      window.setTimeout(() => {
-        if (!removed) return;
-
-        appendLog({
-          message: `🧹 Pod 销毁: ${removed.name} 从 ${nodeId} 释放 CPU ${removed.reqCpu}, Mem ${removed.reqMem}G`,
-          tone: 'muted',
-        });
-      }, 0);
     },
-    [appendLog, runtimeMode],
+    [appendLog],
   );
 
   const totalCapacity = useMemo(
@@ -271,18 +190,10 @@ export default function App() {
   return (
     <main className="flex min-h-screen flex-col gap-3 overflow-y-auto p-3 text-zinc-100 md:p-4 xl:h-screen xl:min-h-0 xl:overflow-hidden">
       <TopConsole
-        mode={runtimeMode}
         connectionStatus={connectionStatus}
-        enabled={trafficEnabled}
-        intervalMs={intervalMs}
-        strategy={strategy}
         pendingCount={pendingQueue.length}
         failedCount={scheduler.failedTasks.length}
-        onModeChange={handleModeChange}
-        onToggle={() => setTrafficEnabled((enabled) => !enabled)}
-        onIntervalChange={setIntervalMs}
         onBurst={handleBurst}
-        onStrategyChange={setStrategy}
       />
 
       <div className="grid flex-none grid-cols-1 gap-3 xl:min-h-0 xl:flex-1 xl:grid-cols-[320px_380px_minmax(460px,1fr)]">
@@ -300,7 +211,7 @@ export default function App() {
 
         <NodeTopologyMatrix
           nodes={nodes}
-          telemetry={runtimeMode === 'mock' ? telemetry : {}}
+          telemetry={noTelemetry}
           registerNodeRef={registerNodeRef}
           onRemovePod={handleRemovePod}
         />

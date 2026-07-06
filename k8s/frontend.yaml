@@ -15,10 +15,19 @@ spec:
       labels:
         app: kubernetes-front
     spec:
+      nodeSelector:
+        kubernetes-front-node: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: web
-          image: your-registry/kubernetes-front:latest
-          imagePullPolicy: IfNotPresent
+          image: kubernetes-front:real-k8s-proxyfix-v1
+          imagePullPolicy: Never
           ports:
             - containerPort: 80
           readinessProbe:

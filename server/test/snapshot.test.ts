@@ -107,3 +107,30 @@ test('buildSnapshot keeps request usage separate from live observed metrics', ()
   assert.equal(snapshot.nodes[0].observedMem, 1.25);
   assert.equal(snapshot.nodes[0].metricsSource, 'metrics-server');
 });
+
+test('buildSnapshot can limit visible pods while keeping total resource accounting', () => {
+  const node: V1Node = {
+    metadata: {
+      name: 'node-a',
+    },
+    status: {
+      allocatable: {
+        cpu: '4',
+        memory: '8Gi',
+      },
+    },
+  };
+  const pods = Array.from({ length: 3 }, (_, index) =>
+    pod({
+      metadata: { namespace: 'scheduler-demo', name: `pod-${index}` },
+      spec: { schedulerName, nodeName: 'node-a', containers: pod({}).spec?.containers ?? [] },
+      status: { phase: 'Running' },
+    }),
+  );
+  const snapshot = buildSnapshot([node], pods, schedulerName, new Map(), { podLimitPerNode: 1 });
+
+  assert.equal(snapshot.nodes[0].podCount, 3);
+  assert.equal(snapshot.nodes[0].pods.length, 1);
+  assert.equal(snapshot.nodes[0].usedCpu, 1.5);
+  assert.equal(snapshot.nodes[0].usedMem, 1.5);
+});

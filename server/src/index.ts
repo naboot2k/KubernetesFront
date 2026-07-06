@@ -3,7 +3,7 @@ import express from 'express';
 import type { V1Binding, V1Node, V1Pod, V1PodList } from '@kubernetes/client-node';
 import { z } from 'zod';
 import { config } from './config.js';
-import { addEventClient, broadcast, removeEventClient, sendEvent } from './events.js';
+import { addEventClient, broadcast, removeEventClient, sendComment, sendEvent } from './events.js';
 import { createK8sClients } from './k8sClient.js';
 import { mapNodeMetrics } from './metrics.js';
 import { buildSnapshot } from './snapshot.js';
@@ -14,25 +14,40 @@ const app = express();
 const clients = createK8sClients();
 let metricsAvailable = false;
 let lastMetricsError: string | null = null;
+let snapshotBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+const defaultPodLimitPerNode = 200;
+const maxPodLimitPerNode = 1000;
+const snapshotCacheTtlMs = 3000;
+let snapshotCache: { podLimitPerNode: number; snapshot: K8sSnapshot; createdAt: number } | null = null;
+let snapshotInFlight: { podLimitPerNode: number; promise: Promise<K8sSnapshot> } | null = null;
 
+app.set('etag', false);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+app.use('/api/k8s', (_request, response, next) => {
+  response.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  response.setHeader('Pragma', 'no-cache');
+  response.setHeader('Expires', '0');
+  response.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
 
 const decisionSchema = z.object({
   task: z.custom<Task>(),
   nodes: z.array(z.any()).optional(),
-  strategy: z.enum(['LeastRequested', 'MostRequested']).default('LeastRequested'),
+  strategy: z.enum(['ClassicScheduler', 'LLMScheduler']).default('ClassicScheduler'),
 });
 
 const bindingSchema = z.object({
   task: z.custom<Task>(),
   targetNodeId: z.string().min(1),
   score: z.number().optional(),
-  strategy: z.enum(['LeastRequested', 'MostRequested']).default('LeastRequested'),
+  strategy: z.enum(['ClassicScheduler', 'LLMScheduler']).default('ClassicScheduler'),
 });
 
 const deletePodSchema = z.object({
   taskId: z.string().min(1),
+  confirmed: z.literal(true),
 });
 
 const burstSchema = z.object({
@@ -52,10 +67,6 @@ function splitTaskId(taskId: string) {
 
   if (!namespace || !name) {
     throw new Error(`taskId 必须使用 namespace/name 格式: ${taskId}`);
-  }
-
-  if (namespace !== config.namespace) {
-    throw new Error(`只允许操作 ${config.namespace} namespace 内的 Pod`);
   }
 
   return { namespace, name };
@@ -78,7 +89,7 @@ async function listNodes() {
 }
 
 async function listPods() {
-  const podList = await callCore<V1PodList>('listNamespacedPod', { namespace: config.namespace });
+  const podList = await callCore<V1PodList>('listPodForAllNamespaces');
   return podList.items ?? [];
 }
 
@@ -118,13 +129,67 @@ async function readPod(namespace: string, name: string) {
   return callCore<V1Pod>('readNamespacedPod', { name, namespace });
 }
 
-async function currentSnapshot(): Promise<K8sSnapshot> {
+function parsePodLimitPerNode(value: unknown) {
+  if (value === undefined) {
+    return defaultPodLimitPerNode;
+  }
+
+  const rawValue = Array.isArray(value) ? value[0] : value;
+  if (rawValue === 'all' || rawValue === '-1') {
+    return -1;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    return defaultPodLimitPerNode;
+  }
+
+  return Math.max(0, Math.min(maxPodLimitPerNode, Math.floor(parsed)));
+}
+
+async function loadSnapshot(podLimitPerNode = defaultPodLimitPerNode): Promise<K8sSnapshot> {
   const [nodes, pods, usageByNode] = await Promise.all([listNodes(), listPods(), listNodeUsageMetrics()]);
-  return buildSnapshot(nodes, pods, config.schedulerName, usageByNode);
+  return buildSnapshot(nodes, pods, config.schedulerName, usageByNode, { podLimitPerNode });
+}
+
+async function currentSnapshot(podLimitPerNode = defaultPodLimitPerNode, options: { force?: boolean } = {}): Promise<K8sSnapshot> {
+  const now = Date.now();
+
+  if (
+    !options.force &&
+    snapshotCache &&
+    snapshotCache.podLimitPerNode === podLimitPerNode &&
+    now - snapshotCache.createdAt < snapshotCacheTtlMs
+  ) {
+    return snapshotCache.snapshot;
+  }
+
+  if (!options.force && snapshotInFlight?.podLimitPerNode === podLimitPerNode) {
+    return snapshotInFlight.promise;
+  }
+
+  const promise = loadSnapshot(podLimitPerNode).then((snapshot) => {
+    snapshotCache = {
+      podLimitPerNode,
+      snapshot,
+      createdAt: Date.now(),
+    };
+    return snapshot;
+  });
+
+  snapshotInFlight = { podLimitPerNode, promise };
+
+  try {
+    return await promise;
+  } finally {
+    if (snapshotInFlight?.promise === promise) {
+      snapshotInFlight = null;
+    }
+  }
 }
 
 async function broadcastSnapshot() {
-  const snapshot = await currentSnapshot();
+  const snapshot = await currentSnapshot(defaultPodLimitPerNode, { force: true });
   broadcast({
     type: 'snapshot',
     nodes: snapshot.nodes,
@@ -132,6 +197,24 @@ async function broadcastSnapshot() {
     failedTasks: snapshot.failedTasks,
   });
   return snapshot;
+}
+
+function scheduleSnapshotBroadcast(reason: string, delayMs = 1000) {
+  if (snapshotBroadcastTimer) {
+    return;
+  }
+
+  snapshotBroadcastTimer = setTimeout(() => {
+    snapshotBroadcastTimer = null;
+    void broadcastSnapshot().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : '未知错误';
+      broadcast({
+        type: 'log',
+        message: `snapshot 刷新失败 (${reason}): ${message}`,
+        tone: 'warning',
+      });
+    });
+  }, delayMs);
 }
 
 async function createBinding(namespace: string, podName: string, nodeName: string) {
@@ -233,7 +316,7 @@ async function startWatch(path: string, label: string) {
             message: `K8s watch ${label}: ${phase}`,
             tone: 'muted',
           });
-          await broadcastSnapshot();
+          scheduleSnapshotBroadcast(`watch ${label}`);
         },
         (error) => {
           if (error) {
@@ -274,9 +357,9 @@ app.get('/healthz', (_request, response) => {
   });
 });
 
-app.get('/api/k8s/snapshot', async (_request, response, next) => {
+app.get('/api/k8s/snapshot', async (request, response, next) => {
   try {
-    response.json(await currentSnapshot());
+    response.json(await currentSnapshot(parsePodLimitPerNode(request.query.podLimitPerNode)));
   } catch (error) {
     next(error);
   }
@@ -284,28 +367,30 @@ app.get('/api/k8s/snapshot', async (_request, response, next) => {
 
 app.get('/api/k8s/events', async (request, response, next) => {
   try {
+    const shouldSendInitialSnapshot = request.query.initial !== 'false';
+
     response.setHeader('Content-Type', 'text/event-stream');
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Connection', 'keep-alive');
+    response.setHeader('X-Accel-Buffering', 'no');
     response.flushHeaders?.();
+    sendComment(response, 'connected');
 
     addEventClient(response);
 
-    const snapshot = await currentSnapshot();
-    sendEvent(response, {
-      type: 'snapshot',
-      nodes: snapshot.nodes,
-      pendingQueue: snapshot.pendingQueue,
-      failedTasks: snapshot.failedTasks,
-    });
+    if (shouldSendInitialSnapshot) {
+      const snapshot = await currentSnapshot();
+      sendEvent(response, {
+        type: 'snapshot',
+        nodes: snapshot.nodes,
+        pendingQueue: snapshot.pendingQueue,
+        failedTasks: snapshot.failedTasks,
+      });
+    }
 
     const heartbeat = setInterval(() => {
-      sendEvent(response, {
-        type: 'log',
-        message: 'heartbeat',
-        tone: 'muted',
-      });
-    }, 15000);
+      sendComment(response, 'heartbeat');
+    }, 10000);
 
     request.on('close', () => {
       clearInterval(heartbeat);
@@ -405,7 +490,7 @@ app.listen(config.port, () => {
   console.log(`namespace=${config.namespace} schedulerName=${config.schedulerName}`);
   console.log(`metricsPollIntervalMs=${config.metricsPollIntervalMs}`);
 
-  void startWatch(`/api/v1/namespaces/${config.namespace}/pods`, 'pods');
+  void startWatch('/api/v1/pods', 'pods');
   void startWatch('/api/v1/nodes', 'nodes');
 
   if (config.metricsPollIntervalMs > 0) {

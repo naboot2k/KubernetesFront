@@ -49,6 +49,10 @@ function ResourceBar({ label, used, observed, capacity, noise, unit, tone }: Res
   );
 }
 
+function podNamespace(podId: string) {
+  return podId.split('/')[0] ?? 'default';
+}
+
 export function NodeTopologyMatrix({
   nodes,
   telemetry,
@@ -70,6 +74,8 @@ export function NodeTopologyMatrix({
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 2xl:grid-cols-2">
         {nodes.map((node) => {
           const signal = telemetry[node.id] ?? { cpuNoise: 0, memNoise: 0 };
+          const totalPods = node.podCount ?? node.pods.length;
+          const visiblePods = node.pods.length;
 
           return (
             <motion.article
@@ -91,7 +97,7 @@ export function NodeTopologyMatrix({
                   </div>
                 </div>
                 <span className="rounded border border-white/10 bg-zinc-950/60 px-2 py-1 font-mono text-xs text-zinc-300">
-                  pods {node.pods.length}
+                  pods {totalPods}
                 </span>
               </div>
 
@@ -120,22 +126,32 @@ export function NodeTopologyMatrix({
                 {node.pods.length === 0 ? (
                   <div className="grid h-full min-h-20 place-items-center text-xs text-zinc-600">no resident pods</div>
                 ) : (
-                  <div className="flex flex-wrap gap-1.5">
-                    {node.pods.map((pod) => (
-                      <button
-                        type="button"
-                        key={pod.id}
-                        title="销毁 Pod 并释放资源"
-                        onClick={() => onRemovePod(node.id, pod.id)}
-                        className="group inline-flex max-w-full items-center gap-1 rounded border border-white/10 bg-white/[0.06] px-2 py-1 font-mono text-[11px] text-zinc-200 transition hover:border-rose-300/40 hover:bg-rose-300/12"
-                      >
-                        <span className="max-w-28 truncate">{pod.name}</span>
-                        <span className="text-zinc-500">
-                          {pod.reqCpu}c/{pod.reqMem}G
-                        </span>
-                        <Trash2 size={11} className="text-zinc-500 group-hover:text-rose-200" />
-                      </button>
-                    ))}
+                  <div className="space-y-2">
+                    {visiblePods < totalPods ? (
+                      <div className="font-mono text-[11px] text-zinc-500">
+                        showing {visiblePods}/{totalPods}
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap gap-1.5">
+                      {node.pods.map((pod) => (
+                        <button
+                          type="button"
+                          key={pod.id}
+                          title={`删除 Pod: ${pod.id}`}
+                          onClick={() => onRemovePod(node.id, pod.id)}
+                          className="group inline-flex max-w-full items-center gap-1 rounded border border-white/10 bg-white/[0.06] px-2 py-1 font-mono text-[11px] text-zinc-200 transition hover:border-rose-300/40 hover:bg-rose-300/12"
+                        >
+                          <span className="max-w-36 truncate">
+                            <span className="text-zinc-500">{podNamespace(pod.id)}/</span>
+                            {pod.name}
+                          </span>
+                          <span className="text-zinc-500">
+                            {pod.reqCpu}c/{pod.reqMem}G
+                          </span>
+                          <Trash2 size={11} className="text-zinc-500 group-hover:text-rose-200" />
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
